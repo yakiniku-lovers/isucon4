@@ -10,6 +10,18 @@ module Isucon4
     use Rack::Flash
     set :public_folder, File.expand_path('../../public', __FILE__)
 
+    setup
+
+    def setup
+      last_succeeds = db.xquery('SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id')
+     
+      $last_succeeds_count = {}
+      last_succeeds.each do |row|
+        count = db.xquery('SELECT COUNT(id) AS cnt FROM login_log WHERE user_id = ? AND ? < id', row['user_id'], row['last_login_id']).first['cnt']
+        $last_succeeds_count[row['user_id'].to_s] = { count: count, login: row['login'] }
+      end↲
+    end
+    
     helpers do
       def config
         @config ||= {
@@ -38,6 +50,16 @@ module Isucon4
                   " (`created_at`, `user_id`, `login`, `ip`, `succeeded`)" \
                   " VALUES (?,?,?,?,?)",
                  Time.now, user_id, login, request.ip, succeeded ? 1 : 0)
+
+        if succeeded
+          $last_succeeds_count.delete(user_id.to_s)
+        else
+          if $last_succeeds_count.has_key?(user_id.to_s)
+            $last_succeeds_count[user_id.to_s][:count] = $last_succeeds_count[user_id.to_s][:count] + 1
+          else
+            $last_succeeds_count[user_id.to_s] = { count: 1, login: login }
+          end
+        end
       end
 
       def user_locked?(user)
@@ -125,14 +147,15 @@ module Isucon4
 
         user_ids.concat not_succeeded.each.map { |r| r['login'] }
 
-        last_succeeds = db.xquery('SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id')
+        user_ids.concat $last_succeeds_count.select { |k,v| v[:count] >= threshold }.map { |k,v| v[:login] }
+        # last_succeeds = db.xquery('SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id')
 
-        last_succeeds.each do |row|
-          count = db.xquery('SELECT COUNT(1) AS cnt FROM login_log WHERE user_id = ? AND ? < id', row['user_id'], row['last_login_id']).first['cnt']
-          if threshold <= count
-            user_ids << row['login']
-          end
-        end
+        # last_succeeds.each do |row|
+        #   count = db.xquery('SELECT COUNT(1) AS cnt FROM login_log WHERE user_id = ? AND ? < id', row['user_id'], row['last_login_id']).first['cnt']
+        #   if threshold <= count
+        #    user_ids << row['login']
+        #   end
+        # end
 
         user_ids
       end
