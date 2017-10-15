@@ -6,4 +6,5 @@ gem "mysql2-cs-bind"
 gem "rack-flash3"
 gem "unicorn"
 gem "foreman"
+gem 'rack-lineprof', github: 'kainosnoema/rack-lineprof'
 
