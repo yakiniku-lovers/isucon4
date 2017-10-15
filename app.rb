@@ -9,7 +9,47 @@ module Isucon4
     use Rack::Session::Cookie, secret: ENV['ISU4_SESSION_SECRET'] || 'shirokane'
     use Rack::Flash
     set :public_folder, File.expand_path('../../public', __FILE__)
+    
+    def initialize
+      super()
+      setup
+    end
+    
+    def setup
+      @user_cache = {}
+      @locked_users = {}
+      
+      # -- locked users
+      threshold = config[:user_lock_threshold]
 
+      not_succeeded = db.xquery('SELECT cnt, user_id, login FROM (SELECT user_id, login, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM login_log GROUP BY user_id) AS t0 WHERE t0.user_id IS NOT NULL AND t0.max_succeeded = 0')
+
+      not_succeeded.each do |r|
+        if threshold <= r['cnt']
+          @locked_users[r['user_id']] = r['login']
+        else
+          @user_cache[r['user_id']] = {
+            count: r['cnt'],
+            login: r['login'],
+          }
+        end
+      end
+
+      last_succeeds = db.xquery('SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id')
+
+      last_succeeds.each do |row|
+        count = db.xquery('SELECT COUNT(1) AS cnt FROM login_log WHERE user_id = ? AND ? < id', row['user_id'], row['last_login_id']).first['cnt']
+        if threshold <= count
+          @locked_users[row['user_id']] = row['login']
+        else
+          @user_cache[row['user_id']] = {
+            count: count,
+            login: row['login'],
+          }
+        end
+      end
+    end
+    
     helpers do
       def config
         @config ||= {
@@ -34,6 +74,24 @@ module Isucon4
       end
 
       def login_log(succeeded, login, user_id = nil)
+        
+        if succeeded
+          @user_cache.delete(user_id)
+        else
+          if @user_cache.has_key?(user_id)
+            @user_cache[user_id][:count] += 1
+            
+            if @user_cache[user_id][:count] >= config[:user_lock_threshold]
+              @locked_users[user_id] = login
+            end
+          else
+            @user_cache[user_id] = {
+              login: login,
+              count: 1,
+            }
+          end
+        end
+        
         db.xquery("INSERT INTO login_log" \
                   " (`created_at`, `user_id`, `login`, `ip`, `succeeded`)" \
                   " VALUES (?,?,?,?,?)",
@@ -42,9 +100,8 @@ module Isucon4
 
       def user_locked?(user)
         return nil unless user
-        log = db.xquery("SELECT COUNT(1) AS failures FROM login_log WHERE user_id = ? AND id > IFNULL((select id from login_log where user_id = ? AND succeeded = 1 ORDER BY id DESC LIMIT 1), 0);", user['id'], user['id']).first
 
-        config[:user_lock_threshold] <= log['failures']
+        @locked_users.has_key?(user['id'])
       end
 
       def ip_banned?
@@ -118,23 +175,7 @@ module Isucon4
       end
 
       def locked_users
-        user_ids = []
-        threshold = config[:user_lock_threshold]
-
-        not_succeeded = db.xquery('SELECT user_id, login FROM (SELECT user_id, login, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM login_log GROUP BY user_id) AS t0 WHERE t0.user_id IS NOT NULL AND t0.max_succeeded = 0 AND t0.cnt >= ?', threshold)
-
-        user_ids.concat not_succeeded.each.map { |r| r['login'] }
-
-        last_succeeds = db.xquery('SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id')
-
-        last_succeeds.each do |row|
-          count = db.xquery('SELECT COUNT(1) AS cnt FROM login_log WHERE user_id = ? AND ? < id', row['user_id'], row['last_login_id']).first['cnt']
-          if threshold <= count
-            user_ids << row['login']
-          end
-        end
-
-        user_ids
+        @locked_users.each_value.to_a
       end
     end
 
