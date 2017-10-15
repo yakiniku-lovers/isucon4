@@ -6,6 +6,8 @@ require 'json'
 require 'logger'
 require 'rack-lineprof'
 
+
+
 module Isucon4
   class App < Sinatra::Base
     use Rack::Session::Cookie, secret: ENV['ISU4_SESSION_SECRET'] || 'shirokane'
@@ -15,6 +17,21 @@ module Isucon4
     use Rack::Lineprof, profile: 'app.rb', logger: logger
     set :public_folder, File.expand_path('../../public', __FILE__)
 
+    def initialize
+      super()
+      setup
+    end
+
+    def setup
+      last_succeeds = db.xquery('SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id')
+     
+      $last_succeeds_count = {}
+      last_succeeds.each do |row|
+        count = db.xquery('SELECT COUNT(id) AS cnt FROM login_log WHERE user_id = ? AND ? < id', row['user_id'], row['last_login_id']).first['cnt']
+        $last_succeeds_count[row['user_id'].to_s] = { count: count, login: row['login'] }
+      end
+    end
+    
     helpers do
       def config
         @config ||= {
@@ -43,6 +60,16 @@ module Isucon4
                   " (`created_at`, `user_id`, `login`, `ip`, `succeeded`)" \
                   " VALUES (?,?,?,?,?)",
                  Time.now, user_id, login, request.ip, succeeded ? 1 : 0)
+
+        if succeeded
+          $last_succeeds_count.delete(user_id.to_s)
+        else
+          if $last_succeeds_count.has_key?(user_id.to_s)
+            $last_succeeds_count[user_id.to_s][:count] = $last_succeeds_count[user_id.to_s][:count] + 1
+          else
+            $last_succeeds_count[user_id.to_s] = { count: 1, login: login }
+          end
+        end
       end
 
       def user_locked?(user)
@@ -129,15 +156,7 @@ module Isucon4
         not_succeeded = db.xquery('SELECT user_id, login FROM (SELECT user_id, login, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM login_log GROUP BY user_id) AS t0 WHERE t0.user_id IS NOT NULL AND t0.max_succeeded = 0 AND t0.cnt >= ?', threshold)
 
         user_ids.concat not_succeeded.each.map { |r| r['login'] }
-
-        last_succeeds = db.xquery('SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id')
-
-        last_succeeds.each do |row|
-          count = db.xquery('SELECT COUNT(1) AS cnt FROM login_log WHERE user_id = ? AND ? < id', row['user_id'], row['last_login_id']).first['cnt']
-          if threshold <= count
-            user_ids << row['login']
-          end
-        end
+        user_ids.concat $last_succeeds_count.select { |k,v| v[:count] >= threshold }.map { |k,v| v[:login] }
 
         user_ids
       end
